@@ -1,0 +1,27 @@
+[package]
+name = "moa-submitter-cli"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Submit kernels to the MOA 2026 kernel optimization competition."
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/micro2026-moa/moa-submitter-cli"
+keywords = ["furiosa", "npu", "kernel", "competition"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "moa-submitter"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
