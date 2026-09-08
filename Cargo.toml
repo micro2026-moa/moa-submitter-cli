@@ -1,6 +1,6 @@
 [package]
 name = "moa-submitter-cli"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 rust-version = "1.74"
 description = "Submit kernels to the MOA 2026 kernel optimization competition."
@@ -19,6 +19,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+unicode-width = "0.2.2"
 ureq = { version = "2", default-features = false, features = ["tls", "json"] }
 
 [profile.release]

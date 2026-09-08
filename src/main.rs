@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
+use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_SERVER: &str = "https://micro2026-api.duckdns.org:7777";
 
@@ -688,17 +689,22 @@ fn print_table(rows: &[Submission]) {
         })
         .collect();
 
-    let mut widths = headers.map(str::len);
+    // 글자 수가 아니라 터미널에서 차지하는 칸 수로 맞춘다. 한글 팀 이름은 한 글자가
+    // 두 칸이라, 글자 수로 채우면 그 줄부터 열이 밀린다.
+    let mut widths = headers.map(UnicodeWidthStr::width);
     for row in &body {
         for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
+            widths[index] = widths[index].max(cell.width());
         }
     }
     let line = |cells: &[String; 5]| {
         cells
             .iter()
             .enumerate()
-            .map(|(index, cell)| format!("{cell:<width$}", width = widths[index]))
+            .map(|(index, cell)| {
+                let pad = widths[index].saturating_sub(cell.width());
+                format!("{cell}{}", " ".repeat(pad))
+            })
             .collect::<Vec<_>>()
             .join("  ")
             .trim_end()
