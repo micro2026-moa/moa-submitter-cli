@@ -10,6 +10,10 @@
 //! 이 도구는 제출물을 검증하지 않는다. contract 판정은 서버 한 곳에서만 내려야
 //! 여기서 통과한 것이 거기서 떨어지는 일이 생기지 않는다.
 
+// ureq::Error 는 응답을 통째로 물고 있어서 크다. 그 타입을 그대로 나르는 것이
+// ureq 를 쓰는 방식이므로 박싱하지 않는다.
+#![allow(clippy::result_large_err)]
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,6 +43,11 @@ const KERNEL_ORDER: &[&str] = &[
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+// 첫 연결이 튕기고 두 번째에 붙는 망이 있다. 전송 계층 실패만 다시 시도한다 --
+// 서버가 상태 코드로 답한 것은 다시 물어도 같은 답이므로 재시도하지 않는다.
+const CONNECT_ATTEMPTS: u32 = 3;
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------------------
 // 종료 코드
@@ -220,6 +229,21 @@ fn load_token() -> Result<String> {
 // HTTP
 // ---------------------------------------------------------------------------
 
+/// 이 도구가 다시 보내도 안전한 요청에만 쓴다. 제출 업로드에는 쓰지 않는다 --
+/// 요청이 닿은 뒤 응답만 끊겼을 수 있어서 다시 보내면 두 번 제출된다.
+fn retrying<F>(mut call: F) -> std::result::Result<ureq::Response, ureq::Error>
+where
+    F: FnMut() -> std::result::Result<ureq::Response, ureq::Error>,
+{
+    for attempt in 1..CONNECT_ATTEMPTS {
+        match call() {
+            Err(ureq::Error::Transport(_)) => std::thread::sleep(RETRY_DELAY * attempt),
+            other => return other,
+        }
+    }
+    call()
+}
+
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout(HTTP_TIMEOUT)
@@ -281,9 +305,7 @@ struct GithubUser {
 
 fn login(server: &str) -> Result<()> {
     let http = agent();
-    let start: DeviceStart = http
-        .post(&format!("{server}/api/cli-auth/start"))
-        .call()
+    let start: DeviceStart = retrying(|| http.post(&format!("{server}/api/cli-auth/start")).call())
         .map_err(|e| unwrap_response(e, "start a login"))?
         .into_json()
         .map_err(|e| Failure::service(format!("The server sent a login reply we could not read: {e}")))?;
@@ -307,6 +329,9 @@ fn login(server: &str) -> Result<()> {
         let url = format!("{server}/api/cli-auth/poll?device_code={}", urlencode(&start.device_code));
         let response = match http.get(&url).call() {
             Ok(response) => response,
+            // 브라우저에서 승인하는 동안 연결이 한 번 튕겼다고 로그인을 버릴 이유는
+            // 없다. 마감 시각까지 계속 물어본다.
+            Err(ureq::Error::Transport(_)) => continue,
             // 404 는 만료, 403 은 명단에 없는 계정이다. 둘 다 기다려 봐야 소용없다.
             Err(ureq::Error::Status(404, _)) => {
                 return Err(Failure::rejected(
@@ -524,7 +549,16 @@ fn submit(server: &str, source: Option<&Path>) -> Result<()> {
         .post(&format!("{server}/api/submissions"))
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
-        .map_err(|e| unwrap_response(e, "send the submission"))?;
+        // 업로드는 다시 보내지 않는다. 요청이 닿은 뒤 응답만 끊겼을 수 있어서,
+        // 다시 보내면 같은 제출이 두 번 들어간다.
+        .map_err(|e| match e {
+            ureq::Error::Transport(transport) => Failure::service(format!(
+                "The upload did not complete: {transport}\n\
+                 Check `moa-submitter status` before submitting again -- it may already have \
+                 gone through."
+            )),
+            other => unwrap_response(other, "send the submission"),
+        })?;
 
     #[derive(Deserialize)]
     struct Created {
@@ -579,11 +613,13 @@ impl Submission {
 
 fn fetch<T: serde::de::DeserializeOwned>(server: &str, path: &str, what: &str) -> Result<T> {
     let token = load_token()?;
-    agent()
-        .get(&format!("{server}{path}"))
-        .set("Authorization", &format!("Bearer {token}"))
-        .call()
-        .map_err(|e| unwrap_response(e, what))?
+    let http = agent();
+    retrying(|| {
+        http.get(&format!("{server}{path}"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .call()
+    })
+    .map_err(|e| unwrap_response(e, what))?
         .into_json()
         .map_err(|e| Failure::service(format!("The server sent a reply we could not read: {e}")))
 }
@@ -709,11 +745,13 @@ fn short_time(raw: Option<&str>) -> String {
 fn show_log(server: &str, submission: &str) -> Result<()> {
     let token = load_token()?;
     let encoded = urlencode(submission);
-    let text = agent()
-        .get(&format!("{server}/api/submissions/{encoded}/log"))
-        .set("Authorization", &format!("Bearer {token}"))
-        .call()
-        .map_err(|e| unwrap_response(e, "read the log"))?
+    let http = agent();
+    let text = retrying(|| {
+        http.get(&format!("{server}/api/submissions/{encoded}/log"))
+            .set("Authorization", &format!("Bearer {token}"))
+            .call()
+    })
+    .map_err(|e| unwrap_response(e, "read the log"))?
         .into_string()
         .map_err(|e| Failure::service(format!("The server sent a log we could not read: {e}")))?;
 
