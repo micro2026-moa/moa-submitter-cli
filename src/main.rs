@@ -619,9 +619,14 @@ impl Submission {
 
     /// 줄을 서 있는 동안에는 몇 번째인지까지 보여준다.
     fn display_status(&self) -> String {
+        // queued_for_npu 는 DB 안에서 쓰는 이름이라 읽는 사람에게는 기계적이다.
+        let label = match self.status.as_str() {
+            "queued_for_npu" => "waiting for NPU",
+            other => other,
+        };
         match self.queue_position {
-            Some(position) => format!("{} (#{position})", self.status),
-            None => self.status.clone(),
+            Some(position) => format!("{label} (#{position})"),
+            None => label.to_owned(),
         }
     }
     fn display_score(&self) -> String {
