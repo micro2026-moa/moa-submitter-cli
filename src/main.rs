@@ -581,10 +581,10 @@ fn submit(server: &str, source: Option<&Path>) -> Result<()> {
 
     println!();
     println!("Submitted as: {}", created.submission.team_name);
-    println!("Submission:   {}", created.submission.submission_id);
+    println!("Submission:   {}", created.submission.short_id());
     println!();
     println!("Track it with:  moa-submitter status");
-    println!("Read the log:   moa-submitter log {}", created.submission.submission_id);
+    println!("Read the log:   moa-submitter log {}", created.submission.short_id());
     Ok(())
 }
 
@@ -610,6 +610,13 @@ struct Submission {
 }
 
 impl Submission {
+    /// 참가자에게 보여줄 id. 전체 id 는 `<타임스탬프>-<8자리>` 인데 앞쪽은 서버가
+    /// 디렉토리를 정렬하려고 붙인 것이라, 뒤 8자리만 쓴다. 시각은 SUBMITTED 열이
+    /// 따로 보여 준다. 서버는 짧은 id 도 전체 id 도 받는다.
+    fn short_id(&self) -> &str {
+        self.submission_id.rsplit('-').next().unwrap_or(&self.submission_id)
+    }
+
     /// 줄을 서 있는 동안에는 몇 번째인지까지 보여준다.
     fn display_status(&self) -> String {
         match self.queue_position {
@@ -667,7 +674,7 @@ fn print_table(rows: &[Submission]) {
         .iter()
         .map(|row| {
             [
-                row.submission_id.clone(),
+                row.short_id().to_owned(),
                 row.team_name.clone(),
                 row.display_status(),
                 row.display_score(),
@@ -700,7 +707,7 @@ fn print_table(rows: &[Submission]) {
 }
 
 fn print_detail(one: &Submission) {
-    println!("Submission:   {}", one.submission_id);
+    println!("Submission:   {}", one.short_id());
     println!("Team:         {}", one.team_name);
     println!("Status:       {}", one.display_status());
     if let Some(stage) = &one.stage {
@@ -735,7 +742,7 @@ fn print_detail(one: &Submission) {
     if let Some(error) = &one.error {
         println!("\n{error}");
     }
-    println!("\nFull log:     moa-submitter log {}", one.submission_id);
+    println!("\nFull log:     moa-submitter log {}", one.short_id());
 }
 
 /// `2026-09-09T04:12:31.001Z` 를 `2026-09-09 04:12` 로 줄인다. 표에 넣기 위한
