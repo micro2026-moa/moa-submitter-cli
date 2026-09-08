@@ -147,7 +147,7 @@ fn main() {
 }
 
 fn quit(failure: Failure) -> ! {
-    eprintln!("{}", failure.message);
+    eprintln!("Error: {}", failure.message);
     std::process::exit(failure.code)
 }
 
@@ -447,6 +447,17 @@ fn collect_sources(root: &Path) -> Result<Vec<Upload>> {
     walk_device(root, &device, &mut files)?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
+    // 디렉토리는 있는데 안이 비어 있으면 서버는 이 제출을 contract 위반으로 떨어뜨린다.
+    // 그걸 알자고 제출을 한 번 쓰고 채점이 끝나기를 기다릴 이유가 없다.
+    if !files.iter().any(|f| f.path.starts_with("src/device/")) {
+        return Err(Failure::usage(format!(
+            "{}/ has no files in {}. The whole directory is uploaded and the server needs it;\n\
+             submit from an unmodified baseline layout.",
+            ALLOWED_DIR,
+            root.display()
+        )));
+    }
+
     if files.len() > MAX_FILES {
         return Err(Failure::usage(format!(
             "A submission may contain at most {MAX_FILES} files, but this one has {}.\n\
@@ -499,7 +510,13 @@ fn walk_device(root: &Path, dir: &Path, out: &mut Vec<Upload>) -> Result<()> {
         let meta = std::fs::symlink_metadata(&path)
             .map_err(|e| Failure::usage(format!("Cannot inspect {}: {e}", path.display())))?;
         if meta.is_symlink() {
-            eprintln!("skipping symlink {}", path.display());
+            // 빠진 파일은 baseline 것으로 채워지지 않는다. src/device/ 는 통째로
+            // 교체되므로, 링크였던 파일은 그냥 없는 채로 빌드된다.
+            eprintln!(
+                "Skipping symlink {}: symlinks are not uploaded, so this file will be \
+                 missing from your submission.",
+                path.display()
+            );
         } else if meta.is_dir() {
             walk_device(root, &path, out)?;
         } else if meta.is_file() {
@@ -613,7 +630,8 @@ struct Submission {
 impl Submission {
     /// 참가자에게 보여줄 id. 전체 id 는 `<타임스탬프>-<8자리>` 인데 앞쪽은 서버가
     /// 디렉토리를 정렬하려고 붙인 것이라, 뒤 8자리만 쓴다. 시각은 SUBMITTED 열이
-    /// 따로 보여 준다. 서버는 짧은 id 도 전체 id 도 받는다.
+    /// 따로 보여 준다. 서버가 받는 것도 이 8자리뿐이다 -- 전체 id 는 받지 않으므로
+    /// 참가자 눈에 띄는 자리에 전체 id 를 내보내면 안 된다.
     fn short_id(&self) -> &str {
         self.submission_id.rsplit('-').next().unwrap_or(&self.submission_id)
     }
