@@ -545,7 +545,18 @@ fn submit(server: &str, source: Option<&Path>) -> Result<()> {
             .collect::<Vec<_>>(),
     });
 
-    let response = agent()
+    // 업로드는 다시 보낼 수 없으므로, 먼저 값싼 요청으로 길을 뚫어 둔다. 첫 연결을
+    // 흘리는 망에서는 이 요청이 대신 맞아 주고, 망이 아예 죽어 있으면 여기서 끝나
+    // 업로드가 닿았는지 아닌지 알 수 없는 상태가 생기지 않는다. 같은 agent 를 쓰므로
+    // 실제 업로드는 방금 세운 연결을 그대로 재사용한다.
+    let http = agent();
+    let warmed = retrying(|| http.get(&format!("{server}/api/health")).call())
+        .map_err(|e| unwrap_response(e, "reach the competition server"))?;
+    // 본문을 끝까지 읽어야 연결이 풀로 돌아간다. 버리면 닫히고, 업로드가 새 연결을
+    // 열면서 방금 뚫어 둔 길을 못 쓴다.
+    let _ = warmed.into_string();
+
+    let response = http
         .post(&format!("{server}/api/submissions"))
         .set("Authorization", &format!("Bearer {token}"))
         .send_json(body)
