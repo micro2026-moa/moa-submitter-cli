@@ -35,6 +35,10 @@ const ALLOWED_DIR: &str = "src/device";
 const MAX_FILES: usize = 1000;
 const MAX_TOTAL_BYTES: u64 = 10 * 1024 * 1024;
 
+/// `status` 가 아무 옵션 없이 보여 주는 줄 수. 대회 후반이면 제출이 수십 건씩
+/// 쌓이는데, 참가자가 확인하려는 것은 거의 언제나 마지막 몇 건이다.
+const DEFAULT_STATUS_ROWS: u64 = 20;
+
 /// 채점하는 커널. 결과를 테스트가 도는 순서로 보여주기 위한 것이다.
 const KERNEL_ORDER: &[&str] = &[
     "ops::sliding_project_qkv",
@@ -118,6 +122,20 @@ enum Command {
         /// A submission id. Omit to list them all.
         #[arg(value_name = "ID")]
         submission: Option<String>,
+
+        /// How many of the most recent submissions to show.
+        #[arg(
+            short = 'n',
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_STATUS_ROWS,
+            value_parser = clap::value_parser!(u64).range(1..=100_000),
+        )]
+        limit: u64,
+
+        /// Show every submission, however many there are.
+        #[arg(long, conflicts_with = "limit")]
+        all: bool,
     },
 
     /// Show the log of one submission.
@@ -137,7 +155,9 @@ fn main() {
     let outcome = match cli.command {
         Command::Login => login(&server),
         Command::Submit { source } => submit(&server, source.as_deref()),
-        Command::Status { submission } => status(&server, submission.as_deref()),
+        Command::Status { submission, limit, all } => {
+            status(&server, submission.as_deref(), if all { None } else { Some(limit as usize) })
+        }
         Command::Log { submission } => show_log(&server, &submission),
     };
 
@@ -666,7 +686,7 @@ fn fetch<T: serde::de::DeserializeOwned>(server: &str, path: &str, what: &str) -
         .map_err(|e| Failure::service(format!("The server sent a reply we could not read: {e}")))
 }
 
-fn status(server: &str, submission: Option<&str>) -> Result<()> {
+fn status(server: &str, submission: Option<&str>, limit: Option<usize>) -> Result<()> {
     match submission {
         Some(id) => {
             #[derive(Deserialize)]
@@ -686,7 +706,21 @@ fn status(server: &str, submission: Option<&str>) -> Result<()> {
                 println!("You have no submissions yet. Run `moa-submitter submit` from your repository.");
                 return Ok(());
             }
-            print_table(&many.data);
+            // 서버는 최신순으로 준다. 최근 것부터 세어 자른 뒤, 표는 오래된 것부터
+            // 찍어서 방금 낸 제출이 프롬프트 바로 위에 오게 한다. 늘 보고 싶은 줄이
+            // 스크롤을 올려야 보이는 자리에 있으면 안 된다.
+            let total = many.data.len();
+            let shown = limit.map_or(total, |n| n.min(total));
+            let hidden = total - shown;
+            if hidden > 0 {
+                println!(
+                    "... {hidden} older submission(s) not shown. `moa-submitter status --all` shows every one."
+                );
+            }
+            let mut rows = many.data;
+            rows.truncate(shown);
+            rows.reverse();
+            print_table(&rows);
         }
     }
     Ok(())
