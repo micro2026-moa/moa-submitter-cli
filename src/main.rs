@@ -26,10 +26,12 @@ use unicode_width::UnicodeWidthStr;
 
 const DEFAULT_SERVER: &str = "https://micro2026-api.duckdns.org:7777";
 
-/// 참가자가 올릴 수 있는 파일. 서버의 allowlist 와 같아야 한다.
-/// ops_vision.rs 와 ops_audio.rs 는 채점하는 세 커널과 무관하므로 보내지 않는다.
-const ALLOWED_FILE: &str = "src/ops.rs";
-const ALLOWED_DIR: &str = "src/device";
+/// 참가자가 올릴 수 있는 범위. 서버의 allowlist 와 같아야 한다.
+/// src/ 전체를 보내되, 채점 때 운영진 사본으로 바뀌는 src/api/ 는 보내지 않는다.
+const ALLOWED_DIR: &str = "src";
+const EXCLUDED_DIR: &str = "src/api";
+/// 저장소를 찾는 표식. baseline 에 항상 있는 파일이다.
+const MARKER_FILE: &str = "src/ops.rs";
 
 /// 서버 상한과 같은 값. 여기서 먼저 걸러야 참가자가 왜 거부됐는지 바로 안다.
 const MAX_FILES: usize = 1000;
@@ -91,7 +93,7 @@ type Result<T> = std::result::Result<T, Failure>;
 #[command(
     name = "moa-submitter",
     version,
-    about = "Submit kernels to the MOA 2026 kernel optimization competition.",
+    about = "Submit your sources to the MOA 2026 Gemma-4 optimization competition.",
     after_help = "Run `moa-submitter login` once, then `moa-submitter submit` from inside your \
                   clone of the baseline repository."
 )]
@@ -109,12 +111,21 @@ enum Command {
     /// Log in with GitHub and store a submission token.
     Login,
 
-    /// Upload your kernel sources and start a submission.
+    /// Upload your sources and start a submission.
     Submit {
         /// Repository to submit. Defaults to the baseline clone containing the
         /// current directory.
         #[arg(long, value_name = "PATH")]
         source: Option<PathBuf>,
+
+        /// Requests kept in flight during grading, 1 to 100.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u64).range(1..=100),
+        )]
+        concurrency: u64,
     },
 
     /// Show your submissions, or one submission in detail.
@@ -154,7 +165,7 @@ fn main() {
 
     let outcome = match cli.command {
         Command::Login => login(&server),
-        Command::Submit { source } => submit(&server, source.as_deref()),
+        Command::Submit { source, concurrency } => submit(&server, source.as_deref(), concurrency),
         Command::Status { submission, limit, all } => {
             status(&server, submission.as_deref(), if all { None } else { Some(limit as usize) })
         }
@@ -419,9 +430,9 @@ fn find_repository(source: Option<&Path>) -> Result<PathBuf> {
         let root = given.canonicalize().map_err(|e| {
             Failure::usage(format!("Cannot open --source {}: {e}", given.display()))
         })?;
-        if !root.join(ALLOWED_FILE).is_file() {
+        if !root.join(MARKER_FILE).is_file() {
             return Err(Failure::usage(format!(
-                "{} is not a baseline checkout: it has no {ALLOWED_FILE}.",
+                "{} is not a baseline checkout: it has no {MARKER_FILE}.",
                 root.display()
             )));
         }
@@ -433,14 +444,14 @@ fn find_repository(source: Option<&Path>) -> Result<PathBuf> {
         .map_err(|e| Failure::usage(format!("Cannot read the current directory: {e}")))?;
     let mut probe = start.as_path();
     loop {
-        if probe.join(ALLOWED_FILE).is_file() {
+        if probe.join(MARKER_FILE).is_file() {
             return Ok(probe.to_path_buf());
         }
         match probe.parent() {
             Some(parent) => probe = parent,
             None => {
                 return Err(Failure::usage(format!(
-                    "No baseline repository here. {} and none of its parents contain {ALLOWED_FILE}.\n\
+                    "No baseline repository here. {} and none of its parents contain {MARKER_FILE}.\n\
                      Run this inside your clone of the baseline, or pass --source <path>.",
                     start.display()
                 )))
@@ -455,24 +466,23 @@ struct Upload {
 }
 
 fn collect_sources(root: &Path) -> Result<Vec<Upload>> {
-    let mut files = vec![read_upload(root, &root.join(ALLOWED_FILE))?];
-    let device = root.join(ALLOWED_DIR);
-    if !device.is_dir() {
+    let mut files = Vec::new();
+    let sources = root.join(ALLOWED_DIR);
+    if !sources.is_dir() {
         return Err(Failure::usage(format!(
             "{}/ is missing from {}. Submit from an unmodified baseline layout.",
             ALLOWED_DIR,
             root.display()
         )));
     }
-    walk_device(root, &device, &mut files)?;
+    walk_sources(root, &sources, &mut files)?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
 
-    // 디렉토리는 있는데 안이 비어 있으면 서버는 이 제출을 contract 위반으로 떨어뜨린다.
-    // 그걸 알자고 제출을 한 번 쓰고 채점이 끝나기를 기다릴 이유가 없다.
-    if !files.iter().any(|f| f.path.starts_with("src/device/")) {
+    // 비어 있으면 서버는 이 제출을 떨어뜨린다. 그걸 알자고 제출을 한 번 쓰고
+    // 채점이 끝나기를 기다릴 이유가 없다.
+    if files.is_empty() {
         return Err(Failure::usage(format!(
-            "{}/ has no files in {}. The whole directory is uploaded and the server needs it;\n\
-             submit from an unmodified baseline layout.",
+            "{}/ has no files in {}. Submit from an unmodified baseline layout.",
             ALLOWED_DIR,
             root.display()
         )));
@@ -519,8 +529,11 @@ fn read_upload(root: &Path, file: &Path) -> Result<Upload> {
 }
 
 /// 심볼릭 링크는 따라가지 않는다. 서버가 어차피 거부하고, 링크를 따라가면
-/// 레포 밖의 파일을 모르는 새 올려 보낼 수 있다.
-fn walk_device(root: &Path, dir: &Path, out: &mut Vec<Upload>) -> Result<()> {
+/// 레포 밖의 파일을 모르는 새 올려 보낼 수 있다. src/api/ 는 건너뛴다.
+fn walk_sources(root: &Path, dir: &Path, out: &mut Vec<Upload>) -> Result<()> {
+    if dir == root.join(EXCLUDED_DIR) {
+        return Ok(());
+    }
     let entries = std::fs::read_dir(dir)
         .map_err(|e| Failure::usage(format!("Cannot read {}: {e}", dir.display())))?;
     for entry in entries {
@@ -530,7 +543,7 @@ fn walk_device(root: &Path, dir: &Path, out: &mut Vec<Upload>) -> Result<()> {
         let meta = std::fs::symlink_metadata(&path)
             .map_err(|e| Failure::usage(format!("Cannot inspect {}: {e}", path.display())))?;
         if meta.is_symlink() {
-            // 빠진 파일은 baseline 것으로 채워지지 않는다. src/device/ 는 통째로
+            // 빠진 파일은 baseline 것으로 채워지지 않는다. src/ 는 통째로
             // 교체되므로, 링크였던 파일은 그냥 없는 채로 빌드된다.
             eprintln!(
                 "Skipping symlink {}: symlinks are not uploaded, so this file will be \
@@ -538,7 +551,7 @@ fn walk_device(root: &Path, dir: &Path, out: &mut Vec<Upload>) -> Result<()> {
                 path.display()
             );
         } else if meta.is_dir() {
-            walk_device(root, &path, out)?;
+            walk_sources(root, &path, out)?;
         } else if meta.is_file() {
             out.push(read_upload(root, &path)?);
         }
@@ -551,29 +564,35 @@ fn walk_device(root: &Path, dir: &Path, out: &mut Vec<Upload>) -> Result<()> {
     Ok(())
 }
 
-/// 무엇을 보내는지 보여주되 23줄을 쏟지는 않는다. 최상위 항목만 세어서 적으면
-/// 예상 밖의 파일이 섞였을 때 개수나 이름이 눈에 띈다.
+/// 무엇을 보내는지 보여주되 수십 줄을 쏟지는 않는다. src/ 바로 아래 항목만 세어서
+/// 적으면 예상 밖의 파일이 섞였을 때 개수나 이름이 눈에 띈다.
 fn print_manifest(files: &[Upload]) {
     let total: u64 = files.iter().map(|f| f.bytes.len() as u64).sum();
     println!("Files:        {} ({:.1} KiB)", files.len(), total as f64 / 1024.0);
-    let under_device = files.iter().filter(|f| f.path.starts_with("src/device/")).count();
-    for file in files.iter().filter(|f| !f.path.starts_with("src/device/")) {
-        println!("                {}", file.path);
+    let mut directories: BTreeMap<&str, usize> = BTreeMap::new();
+    for file in files {
+        let inside = &file.path[ALLOWED_DIR.len() + 1..];
+        match inside.split_once('/') {
+            Some((directory, _)) => *directories.entry(directory).or_default() += 1,
+            None => println!("                {}", file.path),
+        }
     }
-    if under_device > 0 {
-        println!("                src/device/  ({under_device} files)");
+    for (directory, count) in directories {
+        println!("                {ALLOWED_DIR}/{directory}/  ({count} files)");
     }
 }
 
-fn submit(server: &str, source: Option<&Path>) -> Result<()> {
+fn submit(server: &str, source: Option<&Path>, concurrency: u64) -> Result<()> {
     let token = load_token()?;
     let root = find_repository(source)?;
     let files = collect_sources(&root)?;
 
     println!("Repository:   {}", root.display());
+    println!("Concurrency:  {concurrency}");
     print_manifest(&files);
 
     let body = serde_json::json!({
+        "concurrency": concurrency,
         "files": files
             .iter()
             .map(|file| serde_json::json!({

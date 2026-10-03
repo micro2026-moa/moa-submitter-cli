@@ -1,9 +1,9 @@
 [package]
 name = "moa-submitter-cli"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2021"
 rust-version = "1.74"
-description = "Submit kernels to the MOA 2026 kernel optimization competition."
+description = "Submit your sources to the MOA 2026 Gemma-4 optimization competition."
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/micro2026-moa/moa-submitter-cli"

@@ -1,6 +1,6 @@
 # moa-submitter
 
-Submit kernels to the MOA 2026 kernel optimization competition.
+Submit your sources to the MOA 2026 Gemma-4 optimization competition.
 
 ## Install
 
@@ -14,6 +14,7 @@ cargo binstall moa-submitter-cli
 moa-submitter login              # once; the token lasts 30 days
 cd furiosa-opt-gemma4-12B        # your clone of the baseline
 moa-submitter submit
+moa-submitter submit --concurrency 4   # requests kept in flight during grading, default 1
 moa-submitter status
 ```
 
@@ -30,4 +31,4 @@ anywhere inside your clone.
 
 ## What gets uploaded
 
-`src/ops.rs` and everything under `src/device/`.
+Everything under `src/` except `src/api/`.
