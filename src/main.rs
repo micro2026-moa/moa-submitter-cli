@@ -631,6 +631,7 @@ fn submit(server: &str, source: Option<&Path>, concurrency: u64) -> Result<()> {
     #[derive(Deserialize)]
     struct Created {
         submission: Submission,
+        quota: Option<Quota>,
     }
     let created: Created = response
         .into_json()
@@ -639,6 +640,9 @@ fn submit(server: &str, source: Option<&Path>, concurrency: u64) -> Result<()> {
     println!();
     println!("Submitted as: {}", created.submission.team_name);
     println!("Submission:   {}", created.submission.short_id());
+    if let Some(quota) = &created.quota {
+        println!("Daily limit:  {} of {} used in the last 24 hours", quota.used, quota.limit);
+    }
     println!();
     println!("Track it with:  moa-submitter status");
     println!("Read the log:   moa-submitter log {}", created.submission.short_id());
@@ -648,6 +652,28 @@ fn submit(server: &str, source: Option<&Path>, concurrency: u64) -> Result<()> {
 // ---------------------------------------------------------------------------
 // status
 // ---------------------------------------------------------------------------
+
+/// 최근 24시간의 제출 현황. 제한이 없는 팀에게는 서버가 보내지 않는다.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Quota {
+    limit: u32,
+    used: u32,
+    #[serde(default)]
+    submitted_at: Vec<String>,
+    next_available_at: Option<String>,
+}
+
+fn print_quota(quota: &Quota) {
+    println!();
+    println!("Submissions in the last 24 hours: {} of {}", quota.used, quota.limit);
+    for time in &quota.submitted_at {
+        println!("  {} UTC", short_time(Some(time)));
+    }
+    if let Some(next) = &quota.next_available_at {
+        println!("Next submission available at {} UTC", short_time(Some(next)));
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -719,10 +745,14 @@ fn status(server: &str, submission: Option<&str>, limit: Option<usize>) -> Resul
             #[derive(Deserialize)]
             struct Many {
                 data: Vec<Submission>,
+                quota: Option<Quota>,
             }
             let many: Many = fetch(server, "/api/submissions", "list your submissions")?;
             if many.data.is_empty() {
                 println!("You have no submissions yet. Run `moa-submitter submit` from your repository.");
+                if let Some(quota) = &many.quota {
+                    print_quota(quota);
+                }
                 return Ok(());
             }
             // 서버는 최신순으로 준다. 최근 것부터 세어 자른 뒤, 표는 오래된 것부터
@@ -740,6 +770,9 @@ fn status(server: &str, submission: Option<&str>, limit: Option<usize>) -> Resul
             rows.truncate(shown);
             rows.reverse();
             print_table(&rows);
+            if let Some(quota) = &many.quota {
+                print_quota(quota);
+            }
         }
     }
     Ok(())
