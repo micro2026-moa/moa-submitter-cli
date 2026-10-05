@@ -154,6 +154,9 @@ enum Command {
         #[arg(value_name = "ID")]
         submission: String,
     },
+
+    /// Show your GitHub login, team, and whether the team advanced to Stage 2.
+    Whoami,
 }
 
 fn main() {
@@ -170,6 +173,7 @@ fn main() {
             status(&server, submission.as_deref(), if all { None } else { Some(limit as usize) })
         }
         Command::Log { submission } => show_log(&server, &submission),
+        Command::Whoami => whoami(&server),
     };
 
     if let Err(failure) = outcome {
@@ -331,8 +335,29 @@ struct DevicePoll {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GithubUser {
     login: String,
+    #[serde(default)]
+    team_name: Option<String>,
+    #[serde(default)]
+    advanced: Option<bool>,
+}
+
+fn whoami(server: &str) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Me { user: GithubUser }
+    let me: Me = fetch(server, "/api/me", "read your account")?;
+    println!("Login: {}", me.user.login);
+    if let Some(team) = me.user.team_name {
+        println!("Team:  {team}");
+    }
+    match me.user.advanced {
+        Some(true) => println!("Stage 2: advanced"),
+        Some(false) => println!("Stage 2: not advanced"),
+        None => {}
+    }
+    Ok(())
 }
 
 fn login(server: &str) -> Result<()> {
@@ -383,8 +408,21 @@ fn login(server: &str) -> Result<()> {
             .token
             .ok_or_else(|| Failure::service("The server authorized the login but sent no token."))?;
         let path = store_token(&token)?;
-        let who = poll.user.map(|u| u.login).unwrap_or_else(|| "your GitHub account".into());
-        println!("\nLogged in as {who}.");
+        println!();
+        match poll.user {
+            Some(u) => {
+                println!("Logged in as {}.", u.login);
+                if let Some(team) = u.team_name {
+                    let mark = match u.advanced {
+                        Some(true) => "advanced to Stage 2",
+                        Some(false) => "did not advance to Stage 2",
+                        None => "",
+                    };
+                    println!("Team: {team}{}", if mark.is_empty() { String::new() } else { format!("  ({mark})") });
+                }
+            }
+            None => println!("Logged in to your GitHub account."),
+        }
         println!("Token saved to {} (valid for 30 days).", path.display());
         return Ok(());
     }
