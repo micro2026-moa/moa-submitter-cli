@@ -118,6 +118,13 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         source: Option<PathBuf>,
 
+        /// Test run with a server binary you built yourself
+        /// (`cargo furiosa-opt build --release --bin server` -> target/release/server).
+        /// Skips the build and goes straight to evaluation. Counts toward the daily
+        /// limit once it reaches evaluation; the result is not added to the leaderboard.
+        #[arg(long, value_name = "PATH", conflicts_with = "source")]
+        bin: Option<PathBuf>,
+
         /// Requests kept in flight during grading, 1 to 100.
         #[arg(
             long,
@@ -168,7 +175,10 @@ fn main() {
 
     let outcome = match cli.command {
         Command::Login => login(&server),
-        Command::Submit { source, concurrency } => submit(&server, source.as_deref(), concurrency),
+        Command::Submit { source, bin, concurrency } => match bin {
+            Some(binary) => submit_bin(&server, &binary, concurrency),
+            None => submit(&server, source.as_deref(), concurrency),
+        },
         Command::Status { submission, limit, all } => {
             status(&server, submission.as_deref(), if all { None } else { Some(limit as usize) })
         }
@@ -666,6 +676,11 @@ fn submit(server: &str, source: Option<&Path>, concurrency: u64) -> Result<()> {
             other => unwrap_response(other, "send the submission"),
         })?;
 
+    report_created(response)
+}
+
+/// 제출이 받아들여진 뒤의 안내. 소스 제출과 --bin 시험 실행이 같이 쓴다.
+fn report_created(response: ureq::Response) -> Result<()> {
     #[derive(Deserialize)]
     struct Created {
         submission: Submission,
@@ -678,6 +693,9 @@ fn submit(server: &str, source: Option<&Path>, concurrency: u64) -> Result<()> {
     println!();
     println!("Submitted as: {}", created.submission.team_name);
     println!("Submission:   {}", created.submission.short_id());
+    if created.submission.is_test_run() {
+        println!("Kind:         test run (--bin), not added to the leaderboard");
+    }
     if let Some(quota) = &created.quota {
         println!("Daily limit:  {} of {} used in the last 24 hours", quota.used, quota.limit);
     }
@@ -685,6 +703,91 @@ fn submit(server: &str, source: Option<&Path>, concurrency: u64) -> Result<()> {
     println!("Track it with:  moa-submitter status");
     println!("Read the log:   moa-submitter log {}", created.submission.short_id());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// submit --bin
+// ---------------------------------------------------------------------------
+
+/// 서버가 받는 크기와 같다 (leaderboard-server pipeline.js 의 MAX_BIN_*).
+const MAX_BIN_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_BIN_GZIP_BYTES: usize = 15 * 1024 * 1024;
+/// 바이너리는 gzip 해도 수 MB 라 기본 요청 상한(HTTP_TIMEOUT)으로는 느린 망에서 끊긴다.
+const BIN_UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn submit_bin(server: &str, binary: &Path, concurrency: u64) -> Result<()> {
+    let token = load_token()?;
+    let unreadable = |e: std::io::Error| Failure::usage(format!("Cannot read {}: {e}", binary.display()));
+    let size = std::fs::metadata(binary).map_err(unreadable)?.len();
+    if size > MAX_BIN_BYTES {
+        return Err(Failure::usage(format!(
+            "{} is {:.1} MiB, over the {} MiB limit.",
+            binary.display(),
+            size as f64 / 1048576.0,
+            MAX_BIN_BYTES / 1048576
+        )));
+    }
+    let bytes = std::fs::read(binary).map_err(unreadable)?;
+    // 서버도 같은 검사를 하지만, 업로드 전에 걸러야 하루 횟수를 헛되이 쓰지 않는다.
+    let elf = bytes.len() > 20
+        && bytes[..4] == *b"\x7fELF"
+        && bytes[4] == 2
+        && bytes[5] == 1
+        && u16::from_le_bytes([bytes[18], bytes[19]]) == 0x3e;
+    if !elf {
+        return Err(Failure::usage(format!(
+            "{} is not an x86-64 Linux executable.\n\
+             Build the server with `cargo furiosa-opt build --release --bin server` \
+             and pass target/release/server.",
+            binary.display()
+        )));
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let gzipped = encoder
+        .write_all(&bytes)
+        .and_then(|()| encoder.finish())
+        .map_err(|e| Failure::service(format!("Could not compress {}: {e}", binary.display())))?;
+    if gzipped.len() > MAX_BIN_GZIP_BYTES {
+        return Err(Failure::usage(format!(
+            "{} is {:.1} MiB compressed, over the {} MiB upload limit.",
+            binary.display(),
+            gzipped.len() as f64 / 1048576.0,
+            MAX_BIN_GZIP_BYTES / 1048576
+        )));
+    }
+
+    println!(
+        "Binary:       {} ({:.1} MiB, {:.1} MiB compressed)",
+        binary.display(),
+        bytes.len() as f64 / 1048576.0,
+        gzipped.len() as f64 / 1048576.0
+    );
+    println!("Concurrency:  {concurrency}");
+    println!();
+    println!("Test run: the build is skipped, and it counts toward your daily limit once it reaches evaluation.");
+
+    // submit() 과 같은 이유로 먼저 길을 뚫어 둔다.
+    let http = agent();
+    let warmed = retrying(|| http.get(&format!("{server}/api/health")).call())
+        .map_err(|e| unwrap_response(e, "reach the competition server"))?;
+    let _ = warmed.into_string();
+
+    let response = http
+        .post(&format!("{server}/api/submissions/bin?concurrency={concurrency}"))
+        .timeout(BIN_UPLOAD_TIMEOUT)
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", "application/octet-stream")
+        .send_bytes(&gzipped)
+        // 다시 보내지 않는다. submit() 의 주석 참고.
+        .map_err(|e| match e {
+            ureq::Error::Transport(transport) => Failure::service(format!(
+                "The upload did not complete: {transport}\n\
+                 Check `moa-submitter status` before submitting again -- it may already have \
+                 gone through."
+            )),
+            other => unwrap_response(other, "send the test run"),
+        })?;
+    report_created(response)
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +822,8 @@ struct Submission {
     submission_id: String,
     team_name: String,
     status: String,
+    /// "source" 또는 "bin". 2.1.0 이전 서버는 보내지 않는다.
+    kind: Option<String>,
     stage: Option<String>,
     #[serde(default)]
     cycles: BTreeMap<String, serde_json::Value>,
@@ -735,6 +840,10 @@ impl Submission {
     /// 디렉토리를 정렬하려고 붙인 것이라, 뒤 8자리만 쓴다. 시각은 SUBMITTED 열이
     /// 따로 보여 준다. 서버가 받는 것도 이 8자리뿐이다 -- 전체 id 는 받지 않으므로
     /// 참가자 눈에 띄는 자리에 전체 id 를 내보내면 안 된다.
+    fn is_test_run(&self) -> bool {
+        self.kind.as_deref() == Some("bin")
+    }
+
     fn short_id(&self) -> &str {
         self.submission_id.rsplit('-').next().unwrap_or(&self.submission_id)
     }
@@ -746,10 +855,12 @@ impl Submission {
             "queued_for_npu" => "waiting for NPU",
             other => other,
         };
-        match self.queue_position {
+        let shown = match self.queue_position {
             Some(position) => format!("{label} (#{position})"),
             None => label.to_owned(),
-        }
+        };
+        // --bin 시험 실행은 목록에서도 정식 제출과 구별돼야 한다.
+        if self.is_test_run() { format!("{shown} [test]") } else { shown }
     }
     fn display_score(&self) -> String {
         self.score.map(|s| format!("{s:.4}")).unwrap_or_else(|| "-".into())
@@ -863,6 +974,9 @@ fn print_detail(one: &Submission) {
     println!("Submission:   {}", one.short_id());
     println!("Team:         {}", one.team_name);
     println!("Status:       {}", one.display_status());
+    if one.is_test_run() {
+        println!("Kind:         test run (--bin), not added to the leaderboard");
+    }
     if let Some(stage) = &one.stage {
         println!("Stage:        {stage}");
     }

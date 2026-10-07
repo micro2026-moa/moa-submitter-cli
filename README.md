@@ -21,6 +21,19 @@ moa-submitter status
 `submit` finds the repository by walking up from the current directory, so it works from
 anywhere inside your clone.
 
+### Test runs with a prebuilt binary
+
+```sh
+cargo furiosa-opt build --release --bin server
+moa-submitter submit --bin target/release/server --concurrency 4
+```
+
+`--bin` skips the build on our side and goes straight to evaluation, which helps when your
+build takes long. A test run counts toward the daily limit once it reaches evaluation, and
+its result is not added to the leaderboard. A source submission builds `src/api/` from the
+baseline and a prebuilt binary does not, so the two can give different results. To get an
+official score, submit your sources.
+
 | Command | |
 | --- | --- |
 | `moa-submitter status` | your 20 most recent submissions, and your team's submissions in the last 24 hours |
