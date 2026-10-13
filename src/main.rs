@@ -35,7 +35,7 @@ const MARKER_FILE: &str = "src/ops.rs";
 
 /// 서버 상한과 같은 값. 여기서 먼저 걸러야 참가자가 왜 거부됐는지 바로 안다.
 const MAX_FILES: usize = 1000;
-const MAX_TOTAL_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 
 /// `status` 가 아무 옵션 없이 보여 주는 줄 수. 대회 후반이면 제출이 수십 건씩
 /// 쌓이는데, 참가자가 확인하려는 것은 거의 언제나 마지막 몇 건이다.
